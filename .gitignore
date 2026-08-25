@@ -7,6 +7,10 @@ __pycache__/
 output/
 *.log
 
+# Estado runtime (dedup/cap diario): NUNCA versionar, git lo resetearia al hacer fetch
+history.json
+data/
+
 # SO / editor
 .DS_Store
 Thumbs.db

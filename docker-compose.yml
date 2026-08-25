@@ -12,7 +12,8 @@ services:
       - MAX_DAILY=100
       - DAYS_TO_KEEP=90
       - OUTPUT_DIR=/app/output
+      - HISTORY_FILE=/app/data/history.json
     volumes:
       - ./output:/app/output
-      - ./history.json:/app/history.json
+      - ./data:/app/data
     shm_size: 2gb
