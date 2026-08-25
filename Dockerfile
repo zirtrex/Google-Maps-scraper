@@ -29,4 +29,5 @@ RUN mkdir -p /app/output
 ENV API_PORT=8080
 
 # Por defecto levanta la API persistente (la que llama n8n)
-CMD ["python", "/app/api-server.py"]
+# -u = stdout sin buffer, para que los logs se vean en tiempo real
+CMD ["python", "-u", "/app/api-server.py"]

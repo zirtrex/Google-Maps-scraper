@@ -4,7 +4,7 @@ services:
       context: .
       dockerfile: Dockerfile
     restart: unless-stopped
-    command: ["python", "/app/api-server.py"]
+    command: ["python", "-u", "/app/api-server.py"]
     environment:
       - API_PORT=8080
       - MAX_DAILY=100
