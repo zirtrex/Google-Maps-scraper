@@ -3,7 +3,6 @@ services:
     build:
       context: .
       dockerfile: Dockerfile
-    container_name: google-maps-scraper-api
     restart: unless-stopped
     command: ["python", "/app/api-server.py"]
     environment:
@@ -11,8 +10,6 @@ services:
       - MAX_DAILY=100
       - DAYS_TO_KEEP=90
       - OUTPUT_DIR=/app/output
-    ports:
-      - "8080:8080"
     volumes:
       - ./output:/app/output
       - ./history.json:/app/history.json
