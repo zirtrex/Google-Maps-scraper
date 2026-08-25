@@ -1,0 +1,234 @@
+{
+  "name": "Google Maps Scraper (Sheets)",
+  "nodes": [
+    {
+      "parameters": {
+        "rule": {
+          "interval": [
+            {
+              "field": "cronExpression",
+              "cronExpression": "0 6 * * *"
+            }
+          ]
+        }
+      },
+      "id": "sched-1",
+      "name": "Cada mañana 6:00",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.2,
+      "position": [
+        0,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "operation": "read",
+        "documentId": {
+          "__rl": "v2",
+          "value": "TU_ID_DE_HOJA",
+          "mode": "id"
+        },
+        "sheetName": {
+          "__rl": "v2",
+          "value": "Queries",
+          "mode": "name"
+        },
+        "options": {}
+      },
+      "id": "gs-read",
+      "name": "Leer Queries",
+      "type": "n8n-nodes-base.googleSheets",
+      "typeVersion": 4.5,
+      "position": [
+        220,
+        300
+      ],
+      "credentials": {
+        "googleSheetsOAuth2Api": {
+          "id": "REEMPLAZAR",
+          "name": "Google (Sheets)"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "batchSize": 1
+      },
+      "id": "split-1",
+      "name": "Por query",
+      "type": "n8n-nodes-base.splitInBatches",
+      "typeVersion": 3,
+      "position": [
+        440,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "http://TU_API_SCRAPER:8080/run",
+        "sendBody": true,
+        "contentType": "json",
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ query: $json.query, location: $json.location, max_results: $json.max_results ? Number($json.max_results) : 10, search_email: $json.search_email ? String($json.search_email).toLowerCase() !== 'false' : true }) }}",
+        "options": {
+          "timeout": 300000
+        }
+      },
+      "id": "http-run",
+      "name": "Ejecutar scraper",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        720,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "const out = ($json.results || []).map((r) => ({ json: r }));\nif (out.length === 0) {\n  // sin filas nuevas -> no escribir nada\n  return [];\n}\nreturn out;"
+      },
+      "id": "to-rows",
+      "name": "A filas",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        940,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "operation": "append",
+        "documentId": {
+          "__rl": "v2",
+          "value": "TU_ID_DE_HOJA",
+          "mode": "id"
+        },
+        "sheetName": {
+          "__rl": "v2",
+          "value": "Results",
+          "mode": "name"
+        },
+        "columns": {
+          "mappingMode": "autoMapInputData",
+          "value": {},
+          "matchingColumns": [],
+          "schema": []
+        },
+        "options": {}
+      },
+      "id": "gs-append",
+      "name": "Escribir Results",
+      "type": "n8n-nodes-base.googleSheets",
+      "typeVersion": 4.5,
+      "position": [
+        1160,
+        300
+      ],
+      "credentials": {
+        "googleSheetsOAuth2Api": {
+          "id": "REEMPLAZAR",
+          "name": "Google (Sheets)"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "content": "## Google Maps Scraper + Sheets\n\n### Flujo\n1. **6:00 AM** trigger\n2. Lee la sheet **Queries** (1 fila por busqueda)\n3. Llama al scraper API (1 query por vez)\n4. Escribe los nuevos en la sheet **Results**\n\n### Cap diario\nEl scraper respeta `MAX_DAILY` (ej. 100). Cuando se alcanza, devuelve `daily_cap_reached` y no escribe mas.\n\n### Configurar (tras importar)\n1. En ambos nodos de Sheets: seleccionar tu **credential Google** y tu **sheet ID**.\n2. En el nodo **Ejecutar scraper**: poner la URL real de la API (ej. `http://google-maps-scraper-api:8080/run`).\n\n### Columnas de la sheet Queries\n`query | location | max_results | search_email`\n\n### Columnas de la sheet Results\n`nombre | rating | reviews | categoria | direccion | telefono | web | email | horario | scraped_at`"
+      },
+      "id": "note-1",
+      "name": "Sticky Note",
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [
+        0,
+        60
+      ]
+    }
+  ],
+  "pinData": {},
+  "connections": {
+    "Cada mañana 6:00": {
+      "main": [
+        [
+          {
+            "node": "Leer Queries",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Leer Queries": {
+      "main": [
+        [
+          {
+            "node": "Por query",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Por query": {
+      "main": [
+        [],
+        [
+          {
+            "node": "Ejecutar scraper",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Ejecutar scraper": {
+      "main": [
+        [
+          {
+            "node": "A filas",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "A filas": {
+      "main": [
+        [
+          {
+            "node": "Escribir Results",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Escribir Results": {
+      "main": [
+        [
+          {
+            "node": "Por query",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": false,
+  "settings": {
+    "executionTimeout": 7200,
+    "saveExecutionProgress": true,
+    "saveDataErrorExecution": "all",
+    "saveDataSuccessExecution": "all",
+    "executionOrder": "v1"
+  },
+  "meta": {
+    "instanceId": "google-maps-scraper-sheets"
+  },
+  "id": "google-maps-scraper-sheets",
+  "tags": []
+}

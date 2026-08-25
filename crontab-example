@@ -1,0 +1,22 @@
+# Cron ejemplo para google-maps-scraper
+# Instalar: crontab crontab-example
+
+# Diarios - Restaurantes en diferentes ciudades
+0 8 * * * /opt/google-maps-scraper/scraper.sh restaurantes "New York" 20 true
+0 9 * * * /opt/google-maps-scraper/scraper.sh restaurantes "Madrid" 20 true
+0 10 * * * /opt/google-maps-scraper/scraper.sh restaurantes "Barcelona" 20 true
+
+# Semanales - Gimnasios (lunes 8 AM)
+0 8 * * 1 /opt/google-maps-scraper/scraper.sh gimnasios "New York" 15 true
+
+# Semanales - Dentistas (miercoles 9 AM)
+0 9 * * 3 /opt/google-maps-scraper/scraper.sh dentistas "Madrid" 15 true
+
+# Quincenales - Farmacias (1ero y 15 a las 7 AM)
+0 7 1,15 * * /opt/google-maps-scraper/scraper.sh farmacias "New York" 30 true
+
+# Mensuales - Gasolineras (dia 1 a las 6 AM)
+0 6 1 * * /opt/google-maps-scraper/scraper.sh gasolineras "Madrid" 10 false
+
+# Sin buscar emails (mas rapido) - cada 6 horas
+0 */6 * * * /opt/google-maps-scraper/scraper.sh cafeterias "Barcelona" 25 false

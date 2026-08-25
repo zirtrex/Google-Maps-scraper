@@ -1,0 +1,19 @@
+services:
+  google-maps-scraper:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: google-maps-scraper-api
+    restart: unless-stopped
+    command: ["python", "/app/api-server.py"]
+    environment:
+      - API_PORT=8080
+      - MAX_DAILY=100
+      - DAYS_TO_KEEP=90
+      - OUTPUT_DIR=/app/output
+    ports:
+      - "8080:8080"
+    volumes:
+      - ./output:/app/output
+      - ./history.json:/app/history.json
+    shm_size: 2gb

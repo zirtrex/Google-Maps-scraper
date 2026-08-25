@@ -1,0 +1,18 @@
+{
+  "daily": [
+    { "query": "abogados", "location": "Madrid", "max_results": 10, "search_email": true },
+    { "query": "inmobiliarias", "location": "Madrid", "max_results": 10, "search_email": true },
+    { "query": "clínicas dentales", "location": "Madrid", "max_results": 10, "search_email": true },
+    { "query": "agencias de marketing digital", "location": "Madrid", "max_results": 10, "search_email": true },
+    { "query": "consultorías financieras", "location": "Madrid", "max_results": 10, "search_email": true },
+    { "query": "despachos de abogados", "location": "Barcelona", "max_results": 10, "search_email": true },
+    { "query": "empresas de seguros", "location": "Madrid", "max_results": 10, "search_email": true },
+    { "query": "academias de idiomas", "location": "Madrid", "max_results": 10, "search_email": true },
+    { "query": "empresas de contabilidad", "location": "Madrid", "max_results": 10, "search_email": true },
+    { "query": "agencias de viaje", "location": "Madrid", "max_results": 10, "search_email": true }
+  ],
+  "weekly": [
+    { "query": "gimnasios", "location": "Madrid", "max_results": 15, "search_email": true },
+    { "query": "farmacias", "location": "Barcelona", "max_results": 15, "search_email": false }
+  ]
+}
