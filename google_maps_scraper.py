@@ -164,29 +164,89 @@ def save_to_file(results, fmt, query, location):
     save_history(history)
 
 
+UI_TEXT_STOPWORDS = {
+    "directions", "save", "saved", "save to lists", "share", "share place",
+    "nearby", "search nearby", "send to phone", "suggest an edit", "update",
+    "updated", "edit", "overview", "reviews", "menu", "services", "photos",
+    "photo", "popular times", "write a review", "order online", "book online",
+    "see more", "show more", "see all", "learn more", "all", "less",
+    "get directions", "plan route", "claim this business", "own this business",
+    "check history", "call", "website", "address", "hours", "email", "profile",
+    "sponsored", "ad", "new",
+}
+
+ADDR_STREET_RE = re.compile(
+    r"\b\d{1,6}\s+[A-Za-z0-9 .'-]*\b"
+    r"(St|St\.|Ave|Ave\.|Avenue|Blvd|Blvd\.|Rd|Rd\.|Way|Dr|Dr\.|Ln|Ln\.|Pl|Pl\.|"
+    r"Sq|Sq\.|Pkwy|Terrace|Ter|Ct|Cir|Hwy|Broadway|Boulevard|Lane|Drive|Road|"
+    r"Street|Parkway|Circle|Court|Square|Place)\b",
+    re.I,
+)
+
+
+def _is_category_text(text):
+    """Heuristica: el texto parece una categoria de negocio y no UI de Google."""
+    t = text.strip()
+    if not (3 <= len(t) <= 60):
+        return False
+    if not re.match(r"^[A-Za-z0-9&()/' -]+$", t):
+        return False
+    if sum(c.isalpha() for c in t) < 2:
+        return False
+    if t.lower() in UI_TEXT_STOPWORDS:
+        return False
+    if t.startswith(("Open", "Closed", "Opens", "Closes", "Abierto", "Cerrado", "Serves")):
+        return False
+    return True
+
+
+def _find_by_aria(scope, label):
+    for el in scope.find_elements(By.CSS_SELECTOR, "button, a, div[role='button']"):
+        al = (el.get_attribute("aria-label") or "").strip().lower()
+        if al == label:
+            return el
+    return None
+
+
 def extract_from_list(article):
     """Extract basic info from the list view"""
     detail = {}
     spans = article.find_elements(By.TAG_NAME, "span")
+    texts = [s.text.strip() for s in spans]
 
     # Name
-    name = ""
-    for span in spans:
-        if span.text.strip():
-            name = span.text.strip()
-            break
+    name = next((t for t in texts if t), "")
     detail["nombre"] = name if name else "N/A"
 
     # Rating
     detail["rating"] = "N/A"
-    if len(spans) > 4 and spans[4].text.strip():
-        detail["rating"] = spans[4].text.strip()
+    detail["reviews"] = "N/A"
+    rating_idx = -1
+    for idx, text in enumerate(texts):
+        m = re.match(r"^(\d\.\d)\s*\(([\d,.]+)\)$", text)
+        if m:
+            detail["rating"] = m.group(1)
+            detail["reviews"] = m.group(2).replace(",", "")
+            rating_idx = idx
+            break
+        if re.match(r"^\d\.\d$", text):
+            detail["rating"] = text
+            rating_idx = idx
+            break
 
-    # Category
+    # Reviews, ej. (204)
+    if detail["reviews"] == "N/A":
+        for text in texts:
+            m = re.match(r"^\(([\d,.]+)\)$", text)
+            if m:
+                detail["reviews"] = m.group(1).replace(",", "")
+                break
+
+    # Category: primer texto plausible despues del rating
     detail["categoria"] = "N/A"
-    for span in spans[7:]:
-        text = span.text.strip()
-        if text and not re.match(r"^[\d.,]+$", text) and not text.startswith("Abierto") and not text.startswith("Cerrado"):
+    start = rating_idx + 1 if rating_idx >= 0 else 1
+    for text in texts[start:]:
+        if text and text != name and _is_category_text(text):
             detail["categoria"] = text
             break
 
@@ -198,47 +258,71 @@ def extract_from_list(article):
 
 
 def extract_from_detail(driver):
-    """Extract full details from the Google Maps detail page"""
+    """Extract full details del panel de detalle (div[role='main']), no de toda la pagina."""
+    try:
+        WebDriverWait(driver, 20).until(
+            EC.presence_of_element_located((By.CSS_SELECTOR, "div[role='main'] h1"))
+        )
+    except TimeoutException:
+        return {}
+
+    main = driver.find_element(By.CSS_SELECTOR, "div[role='main']")
     detail = {}
-    time.sleep(2)
 
-    spans = driver.find_elements(By.TAG_NAME, "span")
-    links = driver.find_elements(By.TAG_NAME, "a")
+    # Nombre oficial del panel
+    try:
+        name = main.find_element(By.TAG_NAME, "h1").text.strip()
+        if name:
+            detail["nombre"] = name
+    except Exception:
+        pass
 
-    # Rating
+    spans = main.find_elements(By.TAG_NAME, "span")
+    links = main.find_elements(By.TAG_NAME, "a")
+    texts = [s.text.strip() for s in spans]
+
+    # Rating y reviews
     detail["rating"] = "N/A"
-    for span in spans:
-        text = span.text.strip()
-        if re.match(r"^\d+\.\d+$", text) and len(text) == 3:
-            detail["rating"] = text
-            break
-
-    # Reviews
     detail["reviews"] = "N/A"
-    for span in spans:
-        text = span.text.strip()
-        review_match = re.match(r"^\(([\d.,]+)\)$", text)
-        if review_match:
-            num = review_match.group(1).replace(",", "").replace(".", "")
-            if num.isdigit() and int(num) > 100:
-                detail["reviews"] = num
+    for text in texts:
+        m = re.match(r"^(\d\.\d)\s*\(([\d,.]+)\)$", text)
+        if m:
+            detail["rating"] = m.group(1)
+            detail["reviews"] = m.group(2).replace(",", "")
+            break
+    if detail["rating"] == "N/A":
+        for text in texts:
+            if re.match(r"^\d\.\d$", text):
+                detail["rating"] = text
+                break
+    if detail["reviews"] == "N/A":
+        for text in texts:
+            m = re.match(r"^\(([\d,.]+)\)$", text)
+            if m:
+                detail["reviews"] = m.group(1).replace(",", "")
                 break
 
-    # Category
+    # Category: chip bajo el nombre
     detail["categoria"] = "N/A"
-    for span in spans:
-        text = span.text.strip()
-        if text and not re.match(r"^[\d.,]+$", text) and not text.startswith("Cerrado") and not text.startswith("Abierto") and "reviews" not in text.lower() and "opinion" not in text.lower() and len(text) > 5 and len(text) < 150:
-            if "foto" not in text.lower() and "sugerir" not in text.lower() and "escribir" not in text.lower():
-                detail["categoria"] = text
-                break
+    for el in main.find_elements(By.CSS_SELECTOR, "button, a, div[role='button']"):
+        t = el.text.strip()
+        if _is_category_text(t):
+            detail["categoria"] = t
+            break
 
     # Address
     detail["direccion"] = "N/A"
-    for span in spans:
-        text = span.text.strip()
-        if text and ("St." in text or "Ave." in text or "Av." in text or "C." in text or "Calle" in text or "Blvd" in text or "Broadway" in text or "Wall" in text or "Park" in text or "Floor" in text or "Piso" in text):
-            if not text.startswith("Cerrado") and not text.startswith("Abierto") and "reviews" not in text.lower():
+    addr_el = _find_by_aria(main, "address")
+    if addr_el and addr_el.text.strip():
+        detail["direccion"] = addr_el.text.strip()
+    if detail["direccion"] == "N/A":
+        for text in texts:
+            if text.startswith("Serves ") and len(text) < 100:
+                detail["direccion"] = text
+                break
+    if detail["direccion"] == "N/A":
+        for text in texts:
+            if len(text) < 150 and "," in text and ADDR_STREET_RE.search(text):
                 detail["direccion"] = text
                 break
 
@@ -247,44 +331,67 @@ def extract_from_detail(driver):
     for link in links:
         href = link.get_attribute("href")
         if href and href.startswith("tel:"):
-            detail["telefono"] = href.replace("tel:", "")
+            detail["telefono"] = href.replace("tel:", "").replace(" ", "")
             break
 
     # Website
     detail["web"] = "N/A"
-    for link in links:
-        href = link.get_attribute("href")
-        text = link.text.strip()
+    web_el = _find_by_aria(main, "website")
+    if web_el:
+        href = web_el.get_attribute("href") or ""
         if not href:
-            continue
-        if href.startswith("tel:") or href.startswith("mailto:") or href.startswith("javascript:"):
-            continue
-        low = href.lower()
-        if any(b in low for b in BLOCKED_WEB_HOSTS):
-            continue
-        if re.search(r'https?://[^/]+\.(com|org|net|es|co|uk|de|fr|it|ca|au|mx|ar|cl|pe|br)', href):
+            for sub in web_el.find_elements(By.TAG_NAME, "a"):
+                href = sub.get_attribute("href") or ""
+                if href:
+                    break
+        if href.startswith("http"):
             detail["web"] = href
-            break
-        if text and re.match(r'^www\.', text):
-            detail["web"] = "https://" + text
-            break
+    if detail["web"] == "N/A":
+        for link in links:
+            href = link.get_attribute("href")
+            text = link.text.strip()
+            if not href:
+                continue
+            if href.startswith("tel:") or href.startswith("mailto:") or href.startswith("javascript:"):
+                continue
+            low = href.lower()
+            if any(b in low for b in BLOCKED_WEB_HOSTS):
+                continue
+            if re.search(r'https?://[^/]+\.(com|org|net|es|co|uk|de|fr|it|ca|au|mx|ar|cl|pe|br)', href):
+                detail["web"] = href
+                break
+            if text and re.match(r'^www\.', text):
+                detail["web"] = "https://" + text
+                break
 
-    # Hours
+    # Hours (UI en ingles: Open/Closed, con fallback espanol)
     detail["horario"] = "N/A"
-    for span in spans:
-        text = span.text.strip()
-        if text.startswith("Cerrado") or text.startswith("Abierto"):
-            detail["horario"] = text
-            break
+    hours_el = _find_by_aria(main, "hours")
+    if hours_el and hours_el.text.strip():
+        line = hours_el.text.strip().split("\n")[0].replace("\u22c5", " ").strip(" -")
+        if line:
+            detail["horario"] = line
+    if detail["horario"] == "N/A":
+        for text in texts:
+            if len(text) < 60 and text.startswith(("Open", "Closed", "Abierto", "Cerrado")):
+                detail["horario"] = text
+                break
 
     # Email from Google Maps
     detail["email"] = "N/A"
     for link in links:
         href = link.get_attribute("href")
-        text = link.text.strip()
-        if href and ("mailto:" in href or re.match(r'^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$', text)):
-            detail["email"] = href.replace("mailto:", "") if "mailto:" in href else text
-            break
+        if href and "mailto:" in href:
+            e = _valid_email(href.replace("mailto:", "").split("?")[0])
+            if e:
+                detail["email"] = e
+                break
+    if detail["email"] == "N/A":
+        for link in links:
+            m = re.match(r'^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$', link.text.strip())
+            if m:
+                detail["email"] = link.text.strip()
+                break
 
     return detail
 
@@ -512,18 +619,20 @@ def scrape_google_maps(driver, query, location, max_results=20, full_details=Fal
 
         if full_details and list_detail.get("href"):
             try:
-                driver.execute_script(f"window.open('{list_detail['href']}');")
+                driver.execute_script("window.open(arguments[0]);", list_detail["href"])
                 time.sleep(1)
                 tabs = driver.window_handles
                 driver.switch_to.window(tabs[-1])
-                time.sleep(3)
 
                 detail = extract_from_detail(driver)
-                list_detail.update(detail)
+                if detail:
+                    list_detail.update(detail)
 
-                if search_email and detail.get("email") == "N/A" and detail.get("web") != "N/A":
+                if (search_email
+                        and list_detail.get("email") in (None, "N/A")
+                        and list_detail.get("web") not in (None, "N/A")):
                     print(f"  Buscando email en web...")
-                    email = search_email_on_website(detail.get("web", ""), nombre, driver=driver)
+                    email = search_email_on_website(list_detail.get("web", ""), nombre, driver=driver)
                     list_detail["email"] = email
                     print(f"  Email: {email}")
 
