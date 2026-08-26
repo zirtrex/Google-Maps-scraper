@@ -6,8 +6,10 @@ El cap diario (MAX_DAILY) y el dedup los gestiona el scraper via history.json co
 import os
 import sys
 import json
+import secrets
 import traceback
 from http.server import HTTPServer, BaseHTTPRequestHandler
+from urllib.parse import urlparse, parse_qs
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
@@ -18,6 +20,7 @@ from google_maps_scraper import (
     update_last_run,
     today_new_count,
     MAX_DAILY,
+    HISTORY_FILE,
 )
 from datetime import datetime
 
@@ -30,6 +33,9 @@ COLUMNS = [
 # Opcional: si se define API_KEY, /run exige header X-API-Key
 API_KEY = os.environ.get("API_KEY", "")
 
+# Token para /reset: si no se define RESET_TOKEN, se genera aleatorio y se imprime al arrancar
+RESET_TOKEN = os.environ.get("RESET_TOKEN") or secrets.token_hex(16)
+
 
 class ScraperHandler(BaseHTTPRequestHandler):
     def _json(self, code, payload):
@@ -38,8 +44,37 @@ class ScraperHandler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(json.dumps(payload, ensure_ascii=False).encode("utf-8"))
 
+    def _handle_reset(self):
+        parsed = urlparse(self.path)
+        token = (parse_qs(parsed.query).get("token") or [""])[0]
+        ip = self.client_address[0]
+        ua = self.headers.get("User-Agent", "")
+        if token != RESET_TOKEN:
+            print(f"[API] /reset token invalido desde {ip} ua={ua!r}", flush=True)
+            self._json(401, {"status": "unauthorized", "hint": "POST/GET /reset?token=<RESET_TOKEN>"})
+            return
+        removed = False
+        try:
+            if os.path.exists(HISTORY_FILE):
+                os.remove(HISTORY_FILE)
+                removed = True
+        except Exception:
+            print(f"[API] /reset fallo:\n{traceback.format_exc()}", flush=True)
+            self._json(500, {"status": "error", "error": traceback.format_exc().strip().splitlines()[-1]})
+            return
+        print(f"[API] /reset OK (history eliminado={removed}) desde {ip} ua={ua!r}", flush=True)
+        self._json(200, {
+            "status": "reset_done",
+            "history_removed": removed,
+            "today_new": today_new_count(),
+        })
+
     def do_POST(self):
-        if self.path != "/run":
+        parsed = urlparse(self.path)
+        if parsed.path == "/reset":
+            self._handle_reset()
+            return
+        if parsed.path != "/run":
             self._json(404, {"status": "not_found"})
             return
 
@@ -152,6 +187,9 @@ class ScraperHandler(BaseHTTPRequestHandler):
 
     def do_GET(self):
         print(f"[API] GET {self.path} ua={self.headers.get('User-Agent', '')!r}", flush=True)
+        if self.path.startswith("/reset"):
+            self._handle_reset()
+            return
         if self.path == "/health":
             self._json(200, {"status": "ok", "today_new": today_new_count(), "max_daily": MAX_DAILY})
         else:
@@ -176,6 +214,7 @@ class QuietHTTPServer(HTTPServer):
 def run_api(port=8080):
     server = QuietHTTPServer(("0.0.0.0", port), ScraperHandler)
     print(f"API running on port {port}")
+    print(f"[API] /reset token: {RESET_TOKEN}", flush=True)
     server.serve_forever()
 
 
