@@ -17,7 +17,8 @@ from google_maps_scraper import (
     scrape_google_maps,
     setup_driver,
     save_to_file,
-    update_last_run,
+    update_query_state,
+    query_is_exhausted,
     today_new_count,
     MAX_DAILY,
     HISTORY_FILE,
@@ -131,6 +132,22 @@ class ScraperHandler(BaseHTTPRequestHandler):
             })
             return
 
+        # Query agotada: dio 0 nuevos en las ultimas corridas y se corrio hace
+        # poco -> responder de inmediato sin abrir Chrome (ahorra ~40s por fila)
+        if query_is_exhausted(query, location):
+            print(f"[API] query agotada, se salta: {query} en {location}", flush=True)
+            self._json(200, {
+                "status": "success",
+                "exhausted": True,
+                "new_results": 0,
+                "skipped": 0,
+                "query": query,
+                "location": location,
+                "results": [],
+                "timestamp": datetime.now().isoformat(),
+            })
+            return
+
         # 2 intentos con driver fresco (los crashes de Chrome suelen ser transitorios;
         # el dedup por history.json impide duplicados en el reintento)
         results = None
@@ -173,10 +190,11 @@ class ScraperHandler(BaseHTTPRequestHandler):
 
         if rows:
             save_to_file(results, "excel", query, location)
-            update_last_run(query, location)
+        update_query_state(query, location, len(rows))
 
         self._json(200, {
             "status": "success",
+            "exhausted": False,
             "new_results": len(rows),
             "skipped": skipped,
             "query": query,

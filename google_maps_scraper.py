@@ -34,6 +34,11 @@ OUTPUT_DIR = os.environ.get("OUTPUT_DIR", DEFAULT_OUTPUT_DIR)
 HISTORY_FILE = os.environ.get("HISTORY_FILE", os.path.join(PROJECT_DIR, "history.json"))
 DAYS_TO_KEEP = int(os.environ.get("DAYS_TO_KEEP", "30"))
 MAX_DAILY = int(os.environ.get("MAX_DAILY", "0"))  # 0 = sin limite diario de nuevos
+# Query "agotada": si una query da 0 nuevos en EXHAUSTED_STREAK corridas seguidas,
+# la API la salta (sin abrir Chrome) hasta que pase EXHAUSTED_COOLDOWN_DAYS, en que
+# se re-verifica sola (puede haber aparecido un negocio nuevo en Maps).
+EXHAUSTED_STREAK = int(os.environ.get("EXHAUSTED_STREAK", "3"))
+EXHAUSTED_COOLDOWN_DAYS = int(os.environ.get("EXHAUSTED_COOLDOWN_DAYS", "7"))
 
 
 def setup_driver(headless=True):
@@ -111,6 +116,56 @@ def update_last_run(query, location):
     key = f"{query}_{location}"
     history["config"][key] = datetime.now().isoformat()
     save_history(history)
+
+
+def get_query_state(query, location):
+    """Estado por query en el historial: {last_run, zero_streak, last_new}.
+    Compatible con el formato legacy (string de fecha)."""
+    history = load_history()
+    key = f"{query}_{location}"
+    val = history.get("config", {}).get(key)
+    if isinstance(val, dict):
+        return {
+            "last_run": val.get("last_run"),
+            "zero_streak": int(val.get("zero_streak", 0) or 0),
+            "last_new": int(val.get("last_new", 0) or 0),
+        }
+    if isinstance(val, str) and val:
+        return {"last_run": val, "zero_streak": 0, "last_new": 0}
+    return {"last_run": None, "zero_streak": 0, "last_new": 0}
+
+
+def update_query_state(query, location, new_count):
+    """Registrar una corrida: last_run=ahora; zero_streak += 1 si no hubo nuevos
+    (se resetea si si hubo nuevos)."""
+    history = load_history()
+    if "config" not in history:
+        history["config"] = {}
+    key = f"{query}_{location}"
+    prev = get_query_state(query, location)
+    history["config"][key] = {
+        "last_run": datetime.now().isoformat(),
+        "zero_streak": (prev["zero_streak"] + 1) if new_count == 0 else 0,
+        "last_new": new_count,
+    }
+    save_history(history)
+
+
+def query_is_exhausted(query, location):
+    """True si la query dio 0 nuevos en las ultimas EXHAUSTED_STREAK corridas y
+    la ultima corrida fue hace menos de EXHAUSTED_COOLDOWN_DAYS. Al caducar el
+    cooldown se re-verifica sola automaticamente."""
+    if EXHAUSTED_STREAK <= 0:
+        return False
+    st = get_query_state(query, location)
+    if st["zero_streak"] < EXHAUSTED_STREAK or not st["last_run"]:
+        return False
+    try:
+        last = datetime.fromisoformat(st["last_run"])
+    except (TypeError, ValueError):
+        return False
+    age_days = (datetime.now() - last).total_seconds() / 86400
+    return age_days < EXHAUSTED_COOLDOWN_DAYS
 
 
 def save_to_file(results, fmt, query, location):
