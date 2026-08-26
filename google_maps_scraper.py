@@ -14,7 +14,7 @@ import pandas as pd
 import requests
 from bs4 import BeautifulSoup
 from collections import deque
-from urllib.parse import urljoin, urlparse, urldefrag
+from urllib.parse import urljoin, urlparse, urldefrag, parse_qs
 import urllib3
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
@@ -271,6 +271,96 @@ def extract_from_list(article):
     return detail
 
 
+# Texto que parece un dominio de sitio propio (weitzlux.com, www.foo.com)
+DOMAIN_TEXT_RE = re.compile(
+    r"^(?:www\.)?[a-z0-9](?:[a-z0-9-]{0,61})?(?:\.[a-z0-9](?:[a-z0-9-]{0,61})?)*\.[a-z]{2,6}$",
+    re.I,
+)
+
+# Iconos de Google son caracteres PUA (U+E000-U+F8FF) mezclados con el texto
+PUA_ICON_RE = re.compile(r"[\ue000-\uf8ff]")
+
+
+def _unwrap_google_href(href):
+    """Si Google envuelve el link real en google.com/url?q=..., devolver el link real."""
+    if not href:
+        return href
+    low = href.lower()
+    if "google.com/url" in low or "googleusercontent" in low:
+        q = (parse_qs(urlparse(href).query).get("q") or [""])[0]
+        if q.startswith("http"):
+            return q
+    return href
+
+
+def _clean_ui_text(t):
+    """Quitar iconos PUA y devolver la ultima linea con contenido."""
+    if not t:
+        return ""
+    t = PUA_ICON_RE.sub(" ", t)
+    lines = [ln.strip() for ln in t.splitlines() if ln.strip()]
+    return lines[-1] if lines else ""
+
+
+def _domain_from_text(t):
+    """Si el texto (con o sin icono PUA) termina en un dominio, devolverlo."""
+    clean = _clean_ui_text(t)
+    if clean and len(clean) < 60 and DOMAIN_TEXT_RE.match(clean):
+        return clean.lower()
+    return None
+
+
+def _find_aria_prefix(scope, prefixes):
+    """Primer button/a/div[role=button] cuyo aria-label empiece por alguno de los prefijos."""
+    for el in scope.find_elements(By.CSS_SELECTOR, "button, a, div[role='button']"):
+        al = (el.get_attribute("aria-label") or "").strip().lower()
+        if al and any(al.startswith(p) for p in prefixes):
+            return el
+    return None
+
+
+def _web_by_click(main, driver):
+    """Ultimo recurso: hacer click en el elemento de web del panel y leer la URL de la pestana."""
+    original = driver.current_window_handle
+    cands = []
+    el = _find_aria_prefix(main, ("website", "sitio web", "web", "site"))
+    if el:
+        cands.append(el)
+    for el in main.find_elements(By.CSS_SELECTOR, "a, button, div[role='button']"):
+        if el in cands:
+            continue
+        try:
+            t = el.text.strip()
+        except Exception:
+            continue
+        if t and len(t) < 80 and _domain_from_text(t):
+            cands.append(el)
+            break
+    for el in cands:
+        try:
+            el.click()
+            time.sleep(3)
+            tabs = driver.window_handles
+            if len(tabs) > 1:
+                driver.switch_to.window(tabs[-1])
+                url = driver.current_url or ""
+                driver.close()
+                driver.switch_to.window(original)
+            else:
+                url = driver.current_url or ""
+                if url.startswith("http") and "google.com/maps" not in url:
+                    try:
+                        driver.back()
+                        time.sleep(1)
+                    except Exception:
+                        pass
+            if url.startswith("http") and not any(b in url.lower() for b in BLOCKED_WEB_HOSTS):
+                return url
+        except Exception:
+            continue
+    return "N/A"
+
+
 def extract_from_detail(driver):
     """Extract full details del panel de detalle (div[role='main']), no de toda la pagina."""
     try:
@@ -317,7 +407,7 @@ def extract_from_detail(driver):
                 break
     if detail["reviews"] == "N/A":
         for text in texts:
-            m = re.match(r"^([\d][\d,.]*)\s+reviews?$", text, re.I)
+            m = re.match(r"^([\d][\d,.]*)\s+(?:reviews?|opiniones?)$", text, re.I)
             if m:
                 detail["reviews"] = m.group(1).replace(",", "")
                 break
@@ -330,14 +420,16 @@ def extract_from_detail(driver):
             detail["categoria"] = t
             break
 
-    # Address
+    # Address (el aria suele ser "Address: ..."/"Dirección: ...")
     detail["direccion"] = "N/A"
-    addr_el = _find_by_aria(main, "address")
-    if addr_el and addr_el.text.strip():
-        detail["direccion"] = addr_el.text.strip()
+    addr_el = _find_aria_prefix(main, ("address", "direccion", "dirección"))
+    if addr_el:
+        addr_txt = _clean_ui_text(addr_el.text)
+        if addr_txt:
+            detail["direccion"] = addr_txt
     if detail["direccion"] == "N/A":
         for text in texts:
-            if text.startswith("Serves ") and len(text) < 100:
+            if text.startswith(("Serves ", "Atiende ")) and len(text) < 100:
                 detail["direccion"] = text
                 break
     if detail["direccion"] == "N/A":
@@ -354,35 +446,50 @@ def extract_from_detail(driver):
             detail["telefono"] = href.replace("tel:", "").replace(" ", "")
             break
 
-    # Website
+    # Website: el href se inyecta por JS unos instantes despues del h1, asi que
+    # se reintenta unos segundos. El aria suele ser "Website: dominio"/"Sitio web: dominio".
     detail["web"] = "N/A"
-    web_el = _find_by_aria(main, "website")
-    if web_el:
-        href = web_el.get_attribute("href") or ""
-        if not href:
-            for sub in web_el.find_elements(By.TAG_NAME, "a"):
-                href = sub.get_attribute("href") or ""
-                if href:
-                    break
-        if href.startswith("http"):
-            detail["web"] = href
-    if detail["web"] == "N/A":
-        for link in links:
-            href = link.get_attribute("href")
-            text = link.text.strip()
+    deadline = time.time() + 6
+    while detail["web"] == "N/A" and time.time() < deadline:
+        web_el = _find_aria_prefix(main, ("website", "sitio web", "web", "site"))
+        if web_el:
+            href = _unwrap_google_href(web_el.get_attribute("href") or "")
             if not href:
-                continue
-            if href.startswith("tel:") or href.startswith("mailto:") or href.startswith("javascript:"):
-                continue
-            low = href.lower()
-            if any(b in low for b in BLOCKED_WEB_HOSTS):
-                continue
-            if re.search(r'https?://[^/]+\.(com|org|net|es|co|uk|de|fr|it|ca|au|mx|ar|cl|pe|br)', href):
+                for sub in web_el.find_elements(By.TAG_NAME, "a"):
+                    href = _unwrap_google_href(sub.get_attribute("href") or "")
+                    if href:
+                        break
+            if href.startswith("http") and not any(b in href.lower() for b in BLOCKED_WEB_HOSTS):
                 detail["web"] = href
+            else:
+                al = (web_el.get_attribute("aria-label") or "")
+                m = re.match(r'^(?:website|sitio web|web|site)\s*[:\-]?\s*(.+)$', al.strip(), re.I)
+                d = _domain_from_text(m.group(1) if m else web_el.text)
+                if d:
+                    detail["web"] = "https://" + d
+        if detail["web"] == "N/A":
+            for link in main.find_elements(By.TAG_NAME, "a"):
+                href = _unwrap_google_href(link.get_attribute("href") or "")
+                if not href.startswith("http"):
+                    continue
+                low = href.lower()
+                if any(b in low for b in BLOCKED_WEB_HOSTS):
+                    continue
+                if re.search(r'https?://[^/]+\.(com|org|net|es|co|uk|de|fr|it|ca|au|mx|ar|cl|pe|br)', href):
+                    detail["web"] = href
+                    break
+        if detail["web"] == "N/A":
+            time.sleep(2)
+    if detail["web"] == "N/A":
+        # Fila del panel cuyo texto visible es el dominio ("weitzlux.com")
+        for el in main.find_elements(By.CSS_SELECTOR, "a, button, div[role='button']"):
+            d = _domain_from_text(el.text)
+            if d:
+                detail["web"] = "https://" + d
                 break
-            if text and re.match(r'^www\.', text):
-                detail["web"] = "https://" + text
-                break
+    if detail["web"] == "N/A":
+        # Click en el elemento de web y leer la URL de la pestana que abre
+        detail["web"] = _web_by_click(main, driver)
 
     # Hours (UI en ingles: Open/Closed, con fallback espanol)
     detail["horario"] = "N/A"
