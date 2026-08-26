@@ -39,18 +39,41 @@ class ScraperHandler(BaseHTTPRequestHandler):
             self._json(404, {"status": "not_found"})
             return
 
+        content_length = int(self.headers.get("Content-Length", 0) or 0)
+        raw = self.rfile.read(content_length) if content_length > 0 else b""
+        ct = self.headers.get("Content-Type", "")
+        ua = self.headers.get("User-Agent", "")
+        print(f"[API] /run len={len(raw)} ct={ct!r} ua={ua!r}", flush=True)
+        print(f"[API] raw={raw[:200]!r}", flush=True)
+
         try:
-            content_length = int(self.headers.get("Content-Length", 0))
-            data = json.loads(self.rfile.read(content_length)) if content_length else {}
+            data = json.loads(raw) if raw else {}
         except Exception:
-            self._json(400, {"status": "bad_request"})
+            self._json(400, {
+                "status": "bad_request",
+                "hint": "El body debe ser JSON: {\"query\", \"location\", \"max_results\", \"search_email\"}",
+                "content_type": ct,
+            })
+            return
+        if isinstance(data, str):
+            try:
+                data = json.loads(data)
+            except Exception:
+                data = {}
+        if not isinstance(data, dict):
+            self._json(400, {"status": "bad_request", "hint": "El body debe ser un objeto JSON"})
             return
 
-        query = data.get("query", "restaurantes")
-        location = data.get("location", "New York")
-        max_results = int(data.get("max_results", 10))
-        search_email = bool(data.get("search_email", True))
-        full_details = bool(data.get("full_details", True))
+        query = str(data.get("query", "restaurantes"))
+        location = str(data.get("location", "New York"))
+        try:
+            max_results = int(str(data.get("max_results", 10) or 10))
+        except (TypeError, ValueError):
+            max_results = 10
+        se = data.get("search_email", True)
+        search_email = se if isinstance(se, bool) else str(se).strip().lower() in ("1", "true", "yes", "t", "y", "si")
+        fd = data.get("full_details", True)
+        full_details = fd if isinstance(fd, bool) else str(fd).strip().lower() in ("1", "true", "yes", "t", "y", "si")
 
         print(f"API: {query} en {location} (max {max_results})")
 
@@ -106,13 +129,18 @@ class ScraperHandler(BaseHTTPRequestHandler):
                 pass
 
     def do_GET(self):
+        print(f"[API] GET {self.path} ua={self.headers.get('User-Agent', '')!r}", flush=True)
         if self.path == "/health":
             self._json(200, {"status": "ok", "today_new": today_new_count(), "max_daily": MAX_DAILY})
         else:
             self._json(404, {"status": "not_found"})
 
     def log_message(self, fmt, *args):
-        print(f"[API] {args[0]}")
+        try:
+            msg = fmt % args if args else fmt
+        except Exception:
+            msg = f"{fmt} args={args!r}"
+        print(f"[API] {msg}", flush=True)
 
 
 def run_api(port=8080):
