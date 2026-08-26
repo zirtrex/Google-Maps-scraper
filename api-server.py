@@ -6,6 +6,7 @@ El cap diario (MAX_DAILY) y el dedup los gestiona el scraper via history.json co
 import os
 import sys
 import json
+import traceback
 from http.server import HTTPServer, BaseHTTPRequestHandler
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -95,45 +96,59 @@ class ScraperHandler(BaseHTTPRequestHandler):
             })
             return
 
-        driver = setup_driver(headless=True)
-        try:
-            results, skipped = scrape_google_maps(
-                driver, query, location, max_results,
-                full_details, search_email, dedup=True,
-            )
+        # 2 intentos con driver fresco (los crashes de Chrome suelen ser transitorios;
+        # el dedup por history.json impide duplicados en el reintento)
+        results = None
+        skipped = 0
+        last_err = ""
+        for attempt in (1, 2):
+            try:
+                driver = setup_driver(headless=True)
+                try:
+                    results, skipped = scrape_google_maps(
+                        driver, query, location, max_results,
+                        full_details, search_email, dedup=True,
+                    )
+                    last_err = ""
+                    break
+                finally:
+                    try:
+                        driver.quit()
+                    except Exception:
+                        pass
+            except Exception:
+                last_err = traceback.format_exc()
+                print(f"[API] intento {attempt}/2 fallo:\n{last_err}", flush=True)
 
-            now = datetime.now().strftime("%Y-%m-%d %H:%M")
-            rows = []
-            for r in results:
-                r["scraped_at"] = now
-                rows.append({c: r.get(c, "") for c in COLUMNS})
-
-            if rows:
-                save_to_file(results, "excel", query, location)
-                update_last_run(query, location)
-
-            self._json(200, {
-                "status": "success",
-                "new_results": len(rows),
-                "skipped": skipped,
-                "query": query,
-                "location": location,
-                "results": rows,
-                "timestamp": datetime.now().isoformat(),
-            })
-        except Exception as e:
+        if results is None:
             self._json(500, {
                 "status": "error",
-                "error": str(e),
+                "error": last_err.strip().splitlines()[-1] if last_err else "unknown",
                 "query": query,
                 "location": location,
                 "results": [],
             })
-        finally:
-            try:
-                driver.quit()
-            except Exception:
-                pass
+            return
+
+        now = datetime.now().strftime("%Y-%m-%d %H:%M")
+        rows = []
+        for r in results:
+            r["scraped_at"] = now
+            rows.append({c: r.get(c, "") for c in COLUMNS})
+
+        if rows:
+            save_to_file(results, "excel", query, location)
+            update_last_run(query, location)
+
+        self._json(200, {
+            "status": "success",
+            "new_results": len(rows),
+            "skipped": skipped,
+            "query": query,
+            "location": location,
+            "results": rows,
+            "timestamp": datetime.now().isoformat(),
+        })
 
     def do_GET(self):
         print(f"[API] GET {self.path} ua={self.headers.get('User-Agent', '')!r}", flush=True)
