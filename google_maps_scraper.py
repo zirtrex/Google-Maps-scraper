@@ -39,6 +39,9 @@ MAX_DAILY = int(os.environ.get("MAX_DAILY", "0"))  # 0 = sin limite diario de nu
 # se re-verifica sola (puede haber aparecido un negocio nuevo en Maps).
 EXHAUSTED_STREAK = int(os.environ.get("EXHAUSTED_STREAK", "3"))
 EXHAUSTED_COOLDOWN_DAYS = int(os.environ.get("EXHAUSTED_COOLDOWN_DAYS", "7"))
+# Paginas extra a cargar por query: si la pagina visible no da suficientes
+# resultados nuevos, se scrollea el feed para buscar mas (lazy loading de Maps)
+MAX_SCROLLS = int(os.environ.get("MAX_SCROLLS", "10"))
 
 
 def setup_driver(headless=True):
@@ -792,6 +795,28 @@ def search_email_on_website(url, name, max_pages=12, driver=None):
     return _headless_email_fallback(url, driver, cfemail_pages=cfemail_pages)
 
 
+def _scroll_maps_feed(driver):
+    """Scroll del feed de resultados de Maps para forzar el lazy loading."""
+    try:
+        driver.execute_script(
+            "var f = document.querySelector('div[role=feed]'); "
+            "if (f) { f.scrollTop = f.scrollHeight; } "
+            "window.scrollTo(0, document.body.scrollHeight);"
+        )
+    except Exception:
+        pass
+
+
+def _maps_reached_end(driver):
+    """True si Maps mostro el marcador de fin de lista."""
+    try:
+        feed = driver.find_element(By.CSS_SELECTOR, "div[role='feed']")
+        text = (feed.text or "").lower()
+    except Exception:
+        return False
+    return ("reached the end of the list" in text) or ("llegado al final de la lista" in text)
+
+
 def scrape_google_maps(driver, query, location, max_results=20, full_details=False, search_email=False, dedup=True):
     maps_url = f"https://www.google.com/maps/search/{query.replace(' ', '+')}+near+{location.replace(' ', '+')}"
     driver.get(maps_url)
@@ -818,8 +843,6 @@ def scrape_google_maps(driver, query, location, max_results=20, full_details=Fal
             return [], 0
 
     time.sleep(2)
-    articles = driver.find_elements(By.CSS_SELECTOR, "div[role='article']")
-    print(f"Total encontrados: {len(articles)}")
 
     existing = load_existing_results()
 
@@ -832,55 +855,109 @@ def scrape_google_maps(driver, query, location, max_results=20, full_details=Fal
             return [], 0
         cap = min(cap, budget)
 
-    for i, article in enumerate(articles):
+    seen = set()   # nombres ya procesados en esta corrida (el feed crece al scrollear)
+    scroll_count = 0
+    retried = False
+
+    while len(new_results) < cap:
+        articles = driver.find_elements(By.CSS_SELECTOR, "div[role='article']")
+        if scroll_count == 0:
+            print(f"Total encontrados: {len(articles)}")
+
+        # Solo articulos no procesados todavia (la lista va creciendo con cada scroll)
+        pending = []
+        for article in articles:
+            try:
+                list_detail = extract_from_list(article)
+            except Exception:
+                continue
+            nombre = (list_detail.get("nombre") or "").strip()
+            if not nombre or nombre in seen:
+                continue
+            seen.add(nombre)
+            pending.append((article, list_detail))
+
+        if not pending:
+            if scroll_count == 0 and articles and not retried:
+                retried = True
+                time.sleep(2)
+                continue
+            break
+
+        for i, (article, list_detail) in enumerate(pending):
+            if len(new_results) >= cap:
+                break
+
+            nombre = list_detail['nombre']
+
+            # Check if already scraped
+            if dedup and is_duplicate(nombre, existing):
+                skipped += 1
+                continue
+
+            print(f"[{i+1}/{len(pending)}] {nombre} (Rating: {list_detail['rating']})")
+
+            if full_details and list_detail.get("href"):
+                try:
+                    driver.execute_script("window.open(arguments[0]);", list_detail["href"])
+                    time.sleep(1)
+                    tabs = driver.window_handles
+                    driver.switch_to.window(tabs[-1])
+
+                    detail = extract_from_detail(driver)
+                    # Solo sobrescribir con valores reales del panel (no con "N/A")
+                    for k, v in detail.items():
+                        if v not in (None, "", "N/A"):
+                            list_detail[k] = v
+
+                    if (search_email
+                            and list_detail.get("email") in (None, "N/A")
+                            and list_detail.get("web") not in (None, "N/A")):
+                        print(f"  Buscando email en web...")
+                        email = search_email_on_website(list_detail.get("web", ""), nombre, driver=driver)
+                        list_detail["email"] = email
+                        print(f"  Email: {email}")
+
+                    driver.close()
+                    driver.switch_to.window(driver.window_handles[0])
+                    time.sleep(1)
+                except Exception as e:
+                    print(f"  Error: {e}")
+                    try:
+                        driver.close()
+                        driver.switch_to.window(driver.window_handles[0])
+                    except:
+                        pass
+
+            new_results.append(list_detail)
+
         if len(new_results) >= cap:
             break
 
-        list_detail = extract_from_list(article)
-        nombre = list_detail['nombre']
+        # No hubo suficientes nuevos: revisar si quedan mas resultados pendientes
+        if _maps_reached_end(driver):
+            print("Fin de la lista de resultados de Maps.")
+            break
+        if scroll_count >= MAX_SCROLLS:
+            print(f"Maximo de paginas extra ({MAX_SCROLLS}) alcanzado.")
+            break
+        before = len(articles)
+        after = before
+        loaded_more = False
+        for _ in range(3):  # Maps tarda a veces hasta ~7s en cargar la siguiente pagina
+            _scroll_maps_feed(driver)
+            time.sleep(2.5)
+            after = len(driver.find_elements(By.CSS_SELECTOR, "div[role='article']"))
+            if after > before:
+                loaded_more = True
+                break
+        if not loaded_more:
+            print("No cargaron mas resultados (fin de la lista).")
+            break
+        scroll_count += 1
+        print(f"Cargados {after} resultados (pagina {scroll_count + 1})")
 
-        # Check if already scraped
-        if dedup and is_duplicate(nombre, existing):
-            skipped += 1
-            continue
-
-        print(f"[{i+1}/{len(articles)}] {nombre} (Rating: {list_detail['rating']})")
-
-        if full_details and list_detail.get("href"):
-            try:
-                driver.execute_script("window.open(arguments[0]);", list_detail["href"])
-                time.sleep(1)
-                tabs = driver.window_handles
-                driver.switch_to.window(tabs[-1])
-
-                detail = extract_from_detail(driver)
-                # Solo sobrescribir con valores reales del panel (no con "N/A")
-                for k, v in detail.items():
-                    if v not in (None, "", "N/A"):
-                        list_detail[k] = v
-
-                if (search_email
-                        and list_detail.get("email") in (None, "N/A")
-                        and list_detail.get("web") not in (None, "N/A")):
-                    print(f"  Buscando email en web...")
-                    email = search_email_on_website(list_detail.get("web", ""), nombre, driver=driver)
-                    list_detail["email"] = email
-                    print(f"  Email: {email}")
-
-                driver.close()
-                driver.switch_to.window(driver.window_handles[0])
-                time.sleep(1)
-            except Exception as e:
-                print(f"  Error: {e}")
-                try:
-                    driver.close()
-                    driver.switch_to.window(driver.window_handles[0])
-                except:
-                    pass
-
-        new_results.append(list_detail)
-
-    print(f"\nNuevos: {len(new_results)} | Saltados (ya escaneados): {skipped}")
+    print(f"\nNuevos: {len(new_results)} | Saltados (ya escaneados): {skipped} | Paginas: {scroll_count + 1}")
     return new_results, skipped
 
 
