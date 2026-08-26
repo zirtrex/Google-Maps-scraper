@@ -241,6 +241,13 @@ def extract_from_list(article):
             if m:
                 detail["reviews"] = m.group(1).replace(",", "")
                 break
+    # Reviews: "247 reviews" / "247 opiniones"
+    if detail["reviews"] == "N/A":
+        for text in texts:
+            m = re.match(r"^([\d][\d,.]*)\s+(?:reviews?|opiniones?)$", text, re.I)
+            if m:
+                detail["reviews"] = m.group(1).replace(",", "")
+                break
 
     # Category: primer texto plausible despues del rating
     detail["categoria"] = "N/A"
@@ -248,6 +255,13 @@ def extract_from_list(article):
     for text in texts[start:]:
         if text and text != name and _is_category_text(text):
             detail["categoria"] = text
+            break
+
+    # Address (fila con calle en la lista)
+    detail["direccion"] = "N/A"
+    for text in texts:
+        if len(text) < 150 and "," in text and ADDR_STREET_RE.search(text):
+            detail["direccion"] = text
             break
 
     # Get the link
@@ -298,6 +312,12 @@ def extract_from_detail(driver):
     if detail["reviews"] == "N/A":
         for text in texts:
             m = re.match(r"^\(([\d,.]+)\)$", text)
+            if m:
+                detail["reviews"] = m.group(1).replace(",", "")
+                break
+    if detail["reviews"] == "N/A":
+        for text in texts:
+            m = re.match(r"^([\d][\d,.]*)\s+reviews?$", text, re.I)
             if m:
                 detail["reviews"] = m.group(1).replace(",", "")
                 break
@@ -581,12 +601,21 @@ def scrape_google_maps(driver, query, location, max_results=20, full_details=Fal
     skipped = 0
 
     try:
-        WebDriverWait(driver, 15).until(
+        WebDriverWait(driver, 30).until(
             lambda d: len(d.find_elements(By.CSS_SELECTOR, "div[role='article']")) > 0
         )
     except TimeoutException:
-        print("No se encontraron resultados.")
-        return [], 0
+        # Reintento: en el VPS a veces Google tarda mas o sirve una pagina intermedia
+        print("No cargaron resultados a la primera, reintentando...")
+        driver.get(maps_url)
+        time.sleep(5)
+        try:
+            WebDriverWait(driver, 30).until(
+                lambda d: len(d.find_elements(By.CSS_SELECTOR, "div[role='article']")) > 0
+            )
+        except TimeoutException:
+            print("No se encontraron resultados.")
+            return [], 0
 
     time.sleep(2)
     articles = driver.find_elements(By.CSS_SELECTOR, "div[role='article']")
@@ -625,8 +654,10 @@ def scrape_google_maps(driver, query, location, max_results=20, full_details=Fal
                 driver.switch_to.window(tabs[-1])
 
                 detail = extract_from_detail(driver)
-                if detail:
-                    list_detail.update(detail)
+                # Solo sobrescribir con valores reales del panel (no con "N/A")
+                for k, v in detail.items():
+                    if v not in (None, "", "N/A"):
+                        list_detail[k] = v
 
                 if (search_email
                         and list_detail.get("email") in (None, "N/A")
