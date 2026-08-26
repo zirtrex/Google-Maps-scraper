@@ -26,6 +26,9 @@ COLUMNS = [
     "telefono", "web", "email", "horario", "scraped_at",
 ]
 
+# Opcional: si se define API_KEY, /run exige header X-API-Key
+API_KEY = os.environ.get("API_KEY", "")
+
 
 class ScraperHandler(BaseHTTPRequestHandler):
     def _json(self, code, payload):
@@ -37,6 +40,10 @@ class ScraperHandler(BaseHTTPRequestHandler):
     def do_POST(self):
         if self.path != "/run":
             self._json(404, {"status": "not_found"})
+            return
+
+        if API_KEY and self.headers.get("X-API-Key", "") != API_KEY:
+            self._json(401, {"status": "unauthorized"})
             return
 
         content_length = int(self.headers.get("Content-Length", 0) or 0)
@@ -143,8 +150,16 @@ class ScraperHandler(BaseHTTPRequestHandler):
         print(f"[API] {msg}", flush=True)
 
 
+class QuietHTTPServer(HTTPServer):
+    def handle_error(self, request, client_address):
+        exc = sys.exc_info()[1]
+        if isinstance(exc, (ConnectionResetError, TimeoutError, BrokenPipeError)):
+            return
+        super().handle_error(request, client_address)
+
+
 def run_api(port=8080):
-    server = HTTPServer(("0.0.0.0", port), ScraperHandler)
+    server = QuietHTTPServer(("0.0.0.0", port), ScraperHandler)
     print(f"API running on port {port}")
     server.serve_forever()
 
