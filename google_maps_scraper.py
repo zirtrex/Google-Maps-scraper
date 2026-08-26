@@ -594,10 +594,15 @@ def _emails_from_html(html):
     return found
 
 
-def _headless_email_fallback(url, driver):
-    """Renderizar la web con navegador para capturar emails generados por JS."""
+def _headless_email_fallback(url, driver, cfemail_pages=None):
+    """Renderizar la web con navegador para capturar emails generados por JS
+    (ej. proteccion de email de Cloudflare). Primero las paginas donde el crawl
+    estatico vio data-cfemail, luego rutas de contacto habituales."""
     if driver is None:
         return "N/A"
+    pages = [p for p in (cfemail_pages or []) if p][:3]
+    for path in ("/contact", "/contacto", "/contact-us", "/nosotros"):
+        pages.append(url.rstrip("/") + path)
     current_tab = driver.current_window_handle
     try:
         driver.switch_to.new_window("tab")
@@ -605,9 +610,9 @@ def _headless_email_fallback(url, driver):
         time.sleep(4)
         found = _emails_from_html(driver.page_source)
         if not found:
-            for path in ("/contact", "/contacto", "/contact-us", "/nosotros"):
+            for page in pages:
                 try:
-                    driver.get(url.rstrip("/") + path)
+                    driver.get(page)
                     time.sleep(3)
                     found |= _emails_from_html(driver.page_source)
                     if found:
@@ -628,6 +633,15 @@ def _headless_email_fallback(url, driver):
             pass
 
 
+def _norm_host(netloc):
+    """Normalizar host: minusculas y sin prefijo www. (lstrip('www.') borraria
+    tambien letras 'w' de dominios como weitzlux.com)."""
+    netloc = (netloc or "").lower()
+    if netloc.startswith("www."):
+        netloc = netloc[4:]
+    return netloc
+
+
 def search_email_on_website(url, name, max_pages=12, driver=None):
     """Buscar email: crawl estatico BFS + fallback headless si no encuentra."""
     if not url or url == "N/A":
@@ -637,21 +651,42 @@ def search_email_on_website(url, name, max_pages=12, driver=None):
     if not url.startswith("http"):
         url = "https://" + url
 
-    start_netloc = urlparse(url).netloc.lower().lstrip("www.")
+    start_netloc = _norm_host(urlparse(url).netloc)
 
     queue = deque([url])
     seen = set()
     found = set()
+    cfemail_pages = []
     pages_checked = 0
 
-    # Intentar sitemap para encontrar paginas de contacto
+    # Intentar sitemap para encontrar paginas de contacto/oficinas.
+    # El sitemap puede ser un indice de sub-sitemaps (WordPress), en cuyo caso
+    # se expanden los sub-sitemaps XML buscando paginas de contacto/ubicacion.
     try:
         sm = requests.get(url.rstrip("/") + "/sitemap.xml", headers=HEADERS, timeout=6, verify=False)
         if sm.status_code == 200:
-            for loc in re.findall(r"<loc>\s*(\S+?)\s*</loc>", sm.text)[:50]:
-                if urlparse(loc).netloc.lower().lstrip("www.") == start_netloc:
-                    if any(k in loc.lower() for k in ("contact", "contacto", "nosotros", "about")):
-                        queue.appendleft(loc)
+            locs = re.findall(r"<loc>\s*(\S+?)\s*</loc>", sm.text)[:50]
+            is_index = "<sitemapindex" in sm.text
+            subs = []
+            for loc in locs:
+                if _norm_host(urlparse(loc).netloc) != start_netloc:
+                    continue
+                if is_index and loc.lower().endswith(".xml"):
+                    subs.append(loc)
+                elif any(k in loc.lower() for k in ("contact", "contacto", "nosotros", "about")):
+                    queue.appendleft(loc)
+            for sub in subs[:5]:
+                try:
+                    sm2 = requests.get(sub, headers=HEADERS, timeout=6, verify=False)
+                    if sm2.status_code != 200:
+                        continue
+                    for loc in re.findall(r"<loc>\s*(\S+?)\s*</loc>", sm2.text)[:50]:
+                        if _norm_host(urlparse(loc).netloc) != start_netloc:
+                            continue
+                        if any(k in loc.lower() for k in ("contact", "contacto", "nosotros", "about", "location")):
+                            queue.appendleft(loc)
+                except Exception:
+                    pass
     except Exception:
         pass
 
@@ -672,6 +707,8 @@ def search_email_on_website(url, name, max_pages=12, driver=None):
             found |= _emails_from_html(html)
             if found:
                 break
+            if "data-cfemail" in html and resp.url not in cfemail_pages:
+                cfemail_pages.append(resp.url)
             soup = BeautifulSoup(html, "html.parser")
             for a in soup.find_all("a", href=True):
                 href = a["href"]
@@ -681,7 +718,7 @@ def search_email_on_website(url, name, max_pages=12, driver=None):
                 p = urlparse(absu)
                 if p.scheme not in ("http", "https"):
                     continue
-                if p.netloc.lower().lstrip("www.") != start_netloc:
+                if _norm_host(p.netloc) != start_netloc:
                     continue
                 clean = urldefrag(absu)[0]
                 if clean in seen or len(clean) > 250:
@@ -695,8 +732,9 @@ def search_email_on_website(url, name, max_pages=12, driver=None):
 
     if found:
         return sorted(found)[0]
-    # Fallback: renderizar con navegador (captura emails generados por JS)
-    return _headless_email_fallback(url, driver)
+    # Fallback: renderizar con navegador (captura emails generados por JS,
+    # ej. proteccion de Cloudflare en la pagina exacta donde aparece)
+    return _headless_email_fallback(url, driver, cfemail_pages=cfemail_pages)
 
 
 def scrape_google_maps(driver, query, location, max_results=20, full_details=False, search_email=False, dedup=True):
